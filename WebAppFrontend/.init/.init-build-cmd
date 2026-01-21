@@ -1,0 +1,17 @@
+{ "working_directory": "/home/kavia/workspace/code-generation",
+ "command": "#!/usr/bin/env bash
+set -euo pipefail
+WORKSPACE="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
+cd "$WORKSPACE"
+# persist headless env for future shells
+PROFILE=/etc/profile.d/react_headless.sh
+sudo bash -lc "cat > $PROFILE <<EOF\nexport NODE_ENV=development\nexport CI=true\nEOF" || true
+# export into current shell
+export NODE_ENV=development
+export CI=true
+command -v curl >/dev/null 2>&1 || { echo curl required >&2; exit 2; }
+# Clean stale artifacts
+rm -f /tmp/webapp_serve.pid /tmp/webapp_dev.pid /tmp/webapp_serve.out /tmp/webapp_dev.out || true
+# Run production build
+NODE_ENV=production CI=true npm run build --silent
+" }
