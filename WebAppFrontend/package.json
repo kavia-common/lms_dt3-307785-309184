@@ -8,7 +8,10 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "jest --colors --runInBand"
+    "test": "jest --colors --runInBand",
+    "lint": "eslint \"src/**/*.{js,jsx}\"",
+    "lint:fix": "eslint \"src/**/*.{js,jsx}\" --fix",
+    "format": "prettier --write \"**/*.{js,jsx,json,md,css}\""
   },
   "dependencies": {
     "react": "18.2.0",
@@ -16,7 +19,14 @@
     "react-scripts": "5.0.1"
   },
   "devDependencies": {
-    "jest": "^27.5.1"
+    "@eslint/js": "^9.39.2",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "jest": "^27.5.1",
+    "prettier": "^3.8.0"
   },
   "browserslist": {
     "production": [
