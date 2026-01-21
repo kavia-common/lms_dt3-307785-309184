@@ -1,0 +1,29 @@
+{ "working_directory": "/home/kavia/workspace/code-generation",
+ "command": "#!/usr/bin/env bash
+set -euo pipefail
+# Build script for production artifacts (uses container workspace)
+WORKSPACE="${WORKSPACE:-/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend}"
+cd "${WORKSPACE}"
+# Verify node and npm
+command -v node >/dev/null 2>&1 || { echo "ERROR: node not found on PATH" >&2; exit 11; }
+command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not found on PATH" >&2; exit 12; }
+NODE_VER="$(node -v | sed s/^v//)"
+# Require node >=16
+REQUIRED_MAJOR=16
+MAJOR=$(echo "$NODE_VER" | cut -d. -f1)
+if [ "${MAJOR:-0}" -lt "$REQUIRED_MAJOR" ]; then echo "ERROR: node >= ${REQUIRED_MAJOR} required, found ${NODE_VER}" >&2; exit 13; fi
+# Ensure npm global bin on PATH (best-effort, non-failing)
+if npm bin -g >/dev/null 2>&1; then GLOB_BINS="$(npm bin -g)"; case ":$PATH:" in *":$GLOB_BINS:") ;; *) export PATH="$GLOB_BINS:$PATH" ;; esac; fi
+# Run project-local react-scripts build
+if [ -x ./node_modules/.bin/react-scripts ]; then
+  echo "Running production build with project-local react-scripts..."
+  NODE_ENV=production ./node_modules/.bin/react-scripts build || { echo "ERROR: build failed" >&2; exit 22; }
+else
+  echo "ERROR: react-scripts missing; project may use custom toolchain—set WEBAPP_MINIMAL_CUSTOM=1 if intentional" >&2
+  exit 21
+fi
+# Validate artifact
+if [ ! -f build/index.html ]; then echo "ERROR: build artifacts missing (build/index.html not found)" >&2; exit 23; fi
+# Print minimal evidence
+echo "BUILD_OK: build/index.html present"
+" }
