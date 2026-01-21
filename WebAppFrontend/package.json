@@ -2,7 +2,9 @@
   "name": "webapp-frontend",
   "version": "0.1.0",
   "private": true,
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
@@ -13,5 +15,7 @@
     "react-dom": "18.2.0",
     "react-scripts": "5.0.1"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "jest": "^27.5.1"
+  }
 }
