@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+WS="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
+cd "$WS"
+: >"$WS/.init_build.log" || true
+# Ensure node/npm available
+command -v node >/dev/null 2>&1 || { echo "node not found on PATH" >&2; exit 10; }
+command -v npm >/dev/null 2>&1 || { echo "npm not found on PATH" >&2; exit 11; }
+# Build production bundle
+CI=true npm run build >"$WS/.init_build.log" 2>&1 || { echo "build failed - see $WS/.init_build.log" >&2; exit 4; }
+# Copy build log to canonical artifact
+cp -f "$WS/.init_build.log" "$WS/.init/build.log" 2>/dev/null || true
+echo "build ok: build_log=$WS/.init/build.log"
