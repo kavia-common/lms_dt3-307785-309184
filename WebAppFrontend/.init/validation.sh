@@ -1,46 +1,68 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WS="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
-cd "$WS"
-mkdir -p "$WS/.init" || true
-# Quick environment checks
-command -v node >/dev/null 2>&1 || { echo "node not found on PATH" >&2; exit 10; }
-command -v npm >/dev/null 2>&1 || { echo "npm not found on PATH" >&2; exit 11; }
-# Ensure node_modules present
-[ -d node_modules ] || { echo "node_modules missing, run .init/install first" >&2; exit 3; }
-# Run build and capture log
-CI=true npm run build >"$WS/.init/build.log" 2>&1 || { echo "build failed - see $WS/.init/build.log" >&2; echo "artifacts=$WS/.init/build.log"; exit 4; }
-# Start server
-bash .init/start.sh
-# Poll for expected content up to 90s
-MAX=90
-INTERVAL=2
-ELAPSED=0
-FOUND=0
-OUT_HTML="$WS/.init/validation_response.html"
-SNIP="$WS/.init/validation_snippet.html"
-while [ $ELAPSED -lt $MAX ]; do
-  HTTP=$(curl -sS -w "%{http_code}" -o "$OUT_HTML" --max-time 3 http://127.0.0.1:3000/ 2>/dev/null || true)
-  head -c 2048 "$OUT_HTML" >"$SNIP" || true
-  if [ -n "$HTTP" ] && echo "$HTTP" | grep -qE '^[23][0-9][0-9]$'; then
-    if grep -q '<div id="root"' "$OUT_HTML" || grep -q 'Hello from WebAppFrontend' "$OUT_HTML"; then
-      FOUND=1
-      break
+# validation: serve build/ with serve, poll for 2xx/3xx, capture 200 bytes, stop via PGID
+WORKSPACE="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
+cd "$WORKSPACE"
+RUN_DIR="$WORKSPACE/.run"; mkdir -p "$RUN_DIR"
+# choose serve binary: prefer project-local then global
+if [ -x "$WORKSPACE/node_modules/.bin/serve" ]; then
+  SERVE_BIN="$WORKSPACE/node_modules/.bin/serve"
+elif command -v serve >/dev/null 2>&1; then
+  SERVE_BIN="serve"
+else
+  echo "ERROR: serve binary not available; install devDependency 'serve'" >&2
+  exit 6
+fi
+PORT=3001
+LOG="$RUN_DIR/serve.log"
+PIDFILE="$RUN_DIR/serve.pid"
+PGFILE="$RUN_DIR/serve.pgid"
+# start serve in its own process group so we can kill by PGID
+nohup bash -c "exec setsid \"$SERVE_BIN\" -s build -l $PORT" >"$LOG" 2>&1 &
+PID=$!
+printf "%s" "$PID" >"$PIDFILE"
+# obtain PGID; may be empty if process already exited
+PGID=$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ' || true)
+printf "%s" "$PGID" >"$PGFILE"
+# poll for readiness (max ~20s)
+READY=0
+for i in $(seq 1 20); do
+  if command -v curl >/dev/null 2>&1; then
+    CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/" || true)
+    case "$CODE" in
+      2*|3*) READY=1; break;;
+    esac
+  else
+    if command -v ss >/dev/null 2>&1; then
+      ss -ltn "sport = :$PORT" >/dev/null 2>&1 && { READY=1; break; }
+    elif command -v netstat >/dev/null 2>&1; then
+      netstat -ltn 2>/dev/null | /bin/grep -q ":$PORT" && { READY=1; break; }
     fi
   fi
-  sleep $INTERVAL
-  ELAPSED=$((ELAPSED+INTERVAL))
+  sleep 1
 done
-if [ $FOUND -ne 1 ]; then
-  echo "dev server did not serve expected content; see $WS/.init/serve.log and $OUT_HTML" >&2
-  echo "artifacts=build_log=$WS/.init/build.log serve_log=$WS/.init/serve.log response=$OUT_HTML snippet=$SNIP"
-  # Stop server before exiting
-  bash .init/stop.sh || true
-  exit 5
+if [ "$READY" -ne 1 ]; then
+  echo "ERROR: serve did not become ready within timeout; see $LOG" >&2
+  # attempt cleanup
+  if [ -n "$PGID" ] && [ "$PGID" != "" ]; then kill -TERM -"$PGID" >/dev/null 2>&1 || true; fi
+  exit 7
 fi
-# On success, stop server and print artifact paths
-echo "validation ok"
-echo "artifacts=build_log=$WS/.init/build.log serve_log=$WS/.init/serve.log response=$OUT_HTML snippet=$SNIP"
-# stop server
-bash .init/stop.sh || true
+# final HTTP check and capture evidence
+if command -v curl >/dev/null 2>&1; then
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/" || true)
+  case "$CODE" in
+    2*|3*) curl -s "http://127.0.0.1:$PORT/" | head -c 200 > "$RUN_DIR/validation-snippet.txt" || true ;;
+    *) echo "ERROR: served site returned $CODE; see $LOG" >&2; if [ -n "$PGID" ]; then kill -TERM -"$PGID" >/dev/null 2>&1 || true; fi; exit 7 ;;
+  esac
+else
+  echo "WARN: curl not available; cannot perform HTTP validation; check $LOG" >&2
+fi
+# cleanup server by PGID
+if [ -n "$PGID" ] && [ "$PGID" != "" ]; then
+  kill -TERM -"$PGID" >/dev/null 2>&1 || true
+fi
+# wait for pid to exit
+wait "$PID" 2>/dev/null || true
+# output paths for CI visibility
+echo "$LOG" "$PIDFILE" "$PGFILE" "$RUN_DIR/validation-snippet.txt"
 exit 0

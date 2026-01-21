@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WS="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
-cd "$WS"
-: >"$WS/.init_build.log" || true
-# Ensure node/npm available
-command -v node >/dev/null 2>&1 || { echo "node not found on PATH" >&2; exit 10; }
-command -v npm >/dev/null 2>&1 || { echo "npm not found on PATH" >&2; exit 11; }
-# Build production bundle
-CI=true npm run build >"$WS/.init_build.log" 2>&1 || { echo "build failed - see $WS/.init_build.log" >&2; exit 4; }
-# Copy build log to canonical artifact
-cp -f "$WS/.init_build.log" "$WS/.init/build.log" 2>/dev/null || true
-echo "build ok: build_log=$WS/.init/build.log"
+WORKSPACE="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
+cd "$WORKSPACE"
+RUN_DIR="$WORKSPACE/.run"; mkdir -p "$RUN_DIR"
+# Run deterministic production build: prefer yarn when yarn.lock exists
+if [ -f yarn.lock ]; then
+  echo "Using yarn build" >/dev/null
+  yarn build --silent || { echo 'ERROR: build failed' >&2; exit 8; }
+else
+  echo "Using npm run build" >/dev/null
+  npm run build --silent || { echo 'ERROR: build failed' >&2; exit 8; }
+fi
+# Verify artifact existence
+if [ ! -f build/index.html ]; then
+  echo 'ERROR: build did not produce build/index.html' >&2
+  exit 9
+fi
+# Record artifact metadata: size and top files
+( du -sh build 2>/dev/null || true; ls -1 build | head -n 20 ) > "$RUN_DIR/build-info.txt" || true
+exit 0

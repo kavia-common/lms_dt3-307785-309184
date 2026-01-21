@@ -1,29 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# minimal Jest sanity test runner
-WS="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
-cd "$WS"
-# Ensure node_modules present
-if [ ! -d "node_modules" ]; then
-  echo "node_modules missing, run install first" >&2
-  exit 3
+# Non-interactive smoke test step (testing)
+WORKSPACE="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
+cd "$WORKSPACE"
+RUN_DIR="$WORKSPACE/.run"; mkdir -p "$RUN_DIR"
+export CI=1
+# Detect App file extension (prefer TypeScript if present)
+EXT="js"
+if [ -f src/App.tsx ] || [ -f src/App.ts ]; then
+  EXT="tsx"
 fi
-# Create minimal sanity test only if absent
-mkdir -p src
-if [ ! -f src/App.test.js ]; then
-  cat > src/App.test.js <<'JS'
-test('sanity',()=>{expect(1+1).toBe(2)})
+# Ensure tests directory and test file exist idempotently
+TEST_DIR="src/__tests__"
+TEST_FILE="$TEST_DIR/App.smoke.test.$EXT"
+if [ ! -f "$TEST_FILE" ]; then
+  mkdir -p "$TEST_DIR"
+  if [ "$EXT" = "tsx" ]; then
+    cat > "$TEST_FILE" <<'TS'
+import React from 'react';
+import { render } from '@testing-library/react';
+import App from '../App';
+
+test('App renders without throwing', () => {
+  expect(() => render(<App />)).not.toThrow();
+});
+TS
+  else
+    cat > "$TEST_FILE" <<'JS'
+import React from 'react';
+import { render } from '@testing-library/react';
+import App from '../App';
+
+test('App renders without throwing', () => {
+  expect(() => render(<App />)).not.toThrow();
+});
 JS
+  fi
 fi
-JEST_BIN="./node_modules/.bin/jest"
-if [ ! -x "$JEST_BIN" ]; then
-  echo "local jest not found at $JEST_BIN; ensure install completed (see $WS/npm_install.log)" >&2
-  exit 4
+# Run tests once non-interactively using detected package manager
+RESULT_FILE="$RUN_DIR/test-result.txt"
+> "$RESULT_FILE"
+if [ -f yarn.lock ]; then
+  if command -v yarn >/dev/null 2>&1; then
+    set +e
+    yarn test --silent --ci
+    CODE=$?
+    set -e
+  else
+    echo "yarn.lock present but 'yarn' not on PATH" > "$RESULT_FILE"
+    exit 2
+  fi
+else
+  if command -v npm >/dev/null 2>&1; then
+    set +e
+    npm run test -- --ci --silent
+    CODE=$?
+    set -e
+  else
+    echo "npm not available on PATH" > "$RESULT_FILE"
+    exit 2
+  fi
 fi
-# Run jest directly to avoid npm overhead; capture stdout/stderr separately
-"$JEST_BIN" --colors --runInBand >"$WS/test_output.out" 2>"$WS/test_output.log" || {
-  echo "tests failed; see $WS/test_output.log and $WS/test_output.out" >&2
-  exit 5
-}
-# If we reach here tests passed; write short success marker
-printf "OK\n" >"$WS/test_success.marker"
+if [ "$CODE" -eq 0 ]; then
+  echo "OK: tests passed (exit $CODE)" > "$RESULT_FILE"
+else
+  echo "FAIL: tests failed (exit $CODE)" > "$RESULT_FILE"
+fi
+# Also write the raw exit code for tooling
+echo "$CODE" >> "$RESULT_FILE"
+exit "$CODE"
