@@ -1,77 +1,85 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WORKSPACE="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
+
+# Validation: build, start, probe and graceful stop
+WORKSPACE="${WORKSPACE:-/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend}"
 cd "$WORKSPACE"
-# idempotent headless env
-PROFILE=/etc/profile.d/react_headless.sh
-sudo bash -lc "cat > $PROFILE <<'EOF'\nexport NODE_ENV=development\nexport CI=true\nEOF" || true
-export NODE_ENV=development
-export CI=true
-command -v curl >/dev/null 2>&1 || { echo 'curl required' >&2; exit 2; }
-# choose RUN_USER
-RUN_USER=$(awk -F: '($3>=1000)&&($1!="nobody"){print $1; exit}' /etc/passwd || echo devuser)
-# cleanup stale files
-rm -f /tmp/webapp_serve.pid /tmp/webapp_dev.pid /tmp/webapp_serve.out /tmp/webapp_dev.out || true
-# Build production artifacts explicitly with production env
-NODE_ENV=production CI=true npm run build --silent
-# Ensure build exists and owned by non-root
-sudo chown -R "$RUN_USER":"$RUN_USER" "$WORKSPACE/build" || true
-# Serve build: prefer local binary
-PORT=5000
-if [ -x ./node_modules/.bin/serve ]; then
-  sudo -u "$RUN_USER" bash -lc "setsid ./node_modules/.bin/serve -s build -l $PORT > /tmp/webapp_serve.out 2>&1 & echo \$! > /tmp/webapp_serve.pid"
+# determine package manager
+if [ -f yarn.lock ] && [ -f package-lock.json ]; then echo "ERROR: both yarn.lock and package-lock.json present; aborting" >&2; exit 11; fi
+if [ -f yarn.lock ]; then PKG_MANAGER="yarn"; else PKG_MANAGER="npm"; fi
+# Build if build script exists
+if grep -q '"build"' package.json 2>/dev/null; then
+  if [ "$PKG_MANAGER" = "yarn" ]; then yarn build --silent; else npm run build --silent; fi
+fi
+PORT=${PORT:-3000}
+HOST=${HOST:-0.0.0.0}
+LOG="/tmp/webapp_frontend_stdout.log"
+rm -f "$LOG"
+export HOST PORT NODE_ENV=development
+# Start server in new session so we can find descendants
+if [ "$PKG_MANAGER" = "yarn" ]; then
+  setsid sh -c "cd '$WORKSPACE' && exec env NODE_ENV=development HOST=$HOST PORT=$PORT yarn start" >"$LOG" 2>&1 &
 else
-  if command -v npx >/dev/null 2>&1; then
-    sudo -u "$RUN_USER" bash -lc "setsid bash -lc 'npx --yes serve -s build -l $PORT' > /tmp/webapp_serve.out 2>&1 & echo \$! > /tmp/webapp_serve.pid"
-  else
-    echo 'serve not available locally and npx missing' >&2; exit 3
-  fi
+  setsid sh -c "cd '$WORKSPACE' && exec env NODE_ENV=development HOST=$HOST PORT=$PORT npm start" >"$LOG" 2>&1 &
 fi
-SERVE_PID=$(cat /tmp/webapp_serve.pid 2>/dev/null || echo '')
-# Wait for availability
-TRIES=12; i=0; until curl -sSf --max-time 3 "http://localhost:$PORT/" >/dev/null 2>&1 || [ $i -ge $TRIES ]; do sleep 1; i=$((i+1)); done
-if ! curl -sSf --max-time 3 "http://localhost:$PORT/" >/dev/null 2>&1; then
-  echo 'Production build not reachable' >&2; tail -n 200 /tmp/webapp_serve.out || true; [ -n "$SERVE_PID" ] && kill "$SERVE_PID" >/dev/null 2>&1 || true; exit 4
+WRAPPER_PID=$!
+sleep 1
+# find descendant PIDs by walking /proc for children of WRAPPER_PID
+_descendants() {
+  local pid=$1
+  for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$' || true); do
+    if [ -f "/proc/$p/stat" ]; then
+      parent=$(awk '{print $4}' /proc/$p/stat 2>/dev/null || true)
+      if [ "$parent" = "$pid" ]; then
+        echo "$p"
+        _descendants "$p"
+      fi
+    fi
+  done
+}
+SERVER_PIDS=$(_descendants "$WRAPPER_PID" || true)
+# prefer node processes among descendants
+MAIN_PID=""
+for p in $SERVER_PIDS; do
+  cmd=$(tr -d '\0' < /proc/$p/cmdline 2>/dev/null || true)
+  case "$cmd" in
+    *node*|*react-scripts*|*vite*) MAIN_PID=$p; break;;
+  esac
+done
+if [ -z "$MAIN_PID" ]; then MAIN_PID=$(echo "$SERVER_PIDS" | awk '{print $1}' || true); fi
+if [ -z "$MAIN_PID" ]; then MAIN_PID=$WRAPPER_PID; fi
+PGID=$(ps -o pgid= -p "$MAIN_PID" | tr -d ' ' || true)
+[ -n "$PGID" ] || PGID=$(ps -o pgid= -p "$WRAPPER_PID" | tr -d ' ' || true)
+# poll for readiness
+max_wait=60
+interval=2
+elapsed=0
+ok=1
+while [ $elapsed -lt $max_wait ]; do
+  if curl -s --max-time 3 "http://localhost:${PORT}/" >/dev/null 2>&1; then ok=0; break; fi
+  sleep $interval; elapsed=$((elapsed+interval))
+done
+if [ $ok -ne 0 ]; then
+  echo "ERROR: dev server did not respond on port ${PORT} after ${max_wait}s" >&2
+  echo "---server-log-tail---"; tail -n 200 "$LOG" || true
+  # cleanup
+  if [ -n "$PGID" ]; then kill -TERM -"$PGID" >/dev/null 2>&1 || true; fi
+  kill "$WRAPPER_PID" >/dev/null 2>&1 || true
+  wait "$WRAPPER_PID" 2>/dev/null || true
+  exit 15
 fi
-# Stop serve gracefully (use PGID if available)
-if [ -n "$SERVE_PID" ]; then
-  PGID=$(ps -o pgid= -p "$SERVE_PID" | tr -d ' ' || true)
-  [ -n "$PGID" ] && sudo kill -TERM -"$PGID" >/dev/null 2>&1 || sudo kill -TERM "$SERVE_PID" >/dev/null 2>&1 || true
-  sleep 1
-  [ -n "$PGID" ] && sudo kill -0 -"$PGID" >/dev/null 2>&1 && sudo kill -KILL -"$PGID" >/dev/null 2>&1 || true
+STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${PORT}/")
+BODY=$(curl -s --max-time 3 "http://localhost:${PORT}/" | head -c 512)
+echo "HTTP_STATUS=$STATUS"
+echo "BODY_SNIPPET="
+echo "$BODY"
+# graceful stop: kill process group if available, otherwise kill discovered PIDs
+if [ -n "$PGID" ]; then kill -TERM -"$PGID" >/dev/null 2>&1 || true; else
+  for p in $SERVER_PIDS; do kill -TERM "$p" >/dev/null 2>&1 || true; done
 fi
-# Start CRA dev server as non-root user, force PORT to avoid prompts
-PORT=3000
-sudo chown -R "$RUN_USER":"$RUN_USER" "$WORKSPACE" || true
-WRAPPER="$WORKSPACE/.start_dev.sh"
-cat > "$WRAPPER" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-cd "${1}"
-export PORT=${2}
-export CI=true
-setsid npm run start > /tmp/webapp_dev.out 2>&1 &
-echo $! >/tmp/webapp_dev.pid
-SH
-sudo chown "$RUN_USER":"$RUN_USER" "$WRAPPER"
-sudo chmod +x "$WRAPPER"
-# Start wrapper as RUN_USER
-sudo -u "$RUN_USER" bash -lc "$WRAPPER '$WORKSPACE' $PORT" || { echo 'failed to start dev server' >&2; exit 5; }
-DEV_PID=$(cat /tmp/webapp_dev.pid 2>/dev/null || echo '')
-# Wait for dev server
-TRIES=30; i=0; until curl -sSf --max-time 3 "http://localhost:$PORT/" >/dev/null 2>&1 || [ $i -ge $TRIES ]; do sleep 1; i=$((i+1)); done
-if ! curl -sSf --max-time 3 "http://localhost:$PORT/" >/dev/null 2>&1; then
-  echo 'Dev server did not respond on port 3000' >&2; tail -n 300 /tmp/webapp_dev.out || true; [ -n "$DEV_PID" ] && sudo kill -TERM "$DEV_PID" >/dev/null 2>&1 || true; exit 6
-fi
-# Evidence
-echo "build_exists=$( [ -d build ] && echo yes || echo no )"
-curl -sSf --max-time 3 "http://localhost:$PORT/" | head -c 200 || true
-# Stop dev server gracefully using PGID when possible
-if [ -n "$DEV_PID" ]; then
-  PGID=$(ps -o pgid= -p "$DEV_PID" | tr -d ' ' || true)
-  [ -n "$PGID" ] && sudo kill -TERM -"$PGID" >/dev/null 2>&1 || sudo kill -TERM "$DEV_PID" >/dev/null 2>&1 || true
-  sleep 2
-  [ -n "$PGID" ] && sudo kill -0 -"$PGID" >/dev/null 2>&1 && sudo kill -KILL -"$PGID" >/dev/null 2>&1 || true
-fi
-# Cleanup temporary files
-rm -f /tmp/webapp_serve.pid /tmp/webapp_dev.pid /tmp/webapp_serve.out /tmp/webapp_dev.out || true
+sleep 3
+# escalate if necessary
+if [ -n "$PGID" ] && ps -o pid= -g "$PGID" >/dev/null 2>&1; then kill -KILL -"$PGID" >/dev/null 2>&1 || true; fi
+if kill -0 "$WRAPPER_PID" >/dev/null 2>&1; then kill -KILL "$WRAPPER_PID" >/dev/null 2>&1 || true; fi
+wait "$WRAPPER_PID" 2>/dev/null || true
+echo "---server-log-tail---"; tail -n 50 "$LOG" || true

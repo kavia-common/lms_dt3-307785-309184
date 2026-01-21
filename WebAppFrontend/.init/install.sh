@@ -1,49 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# dependencies install step (idempotent, non-interactive)
 WORKSPACE="/home/kavia/workspace/code-generation/lms_dt3-307785-309184/WebAppFrontend"
 cd "$WORKSPACE"
-[ -f package.json ] || { echo 'package.json missing; run scaffold first' >&2; exit 2; }
-cp package.json package.json.bak || true
-# Prefer yarn when yarn.lock present
-if [ -f yarn.lock ]; then
-  command -v yarn >/dev/null 2>&1 || { echo 'yarn not found' >&2; exit 3; }
-  yarn install --non-interactive --silent || { echo 'yarn install failed' >&2; exit 4; }
-else
-  command -v npm >/dev/null 2>&1 || { echo 'npm not found' >&2; exit 5; }
-  if [ -f package-lock.json ]; then
-    npm ci --no-audit --progress=false --no-fund --silent || npm install --no-audit --progress=false --no-fund --silent || { echo 'npm install failed' >&2; exit 6; }
+# abort if both lockfiles present
+[ -f yarn.lock -a -f package-lock.json ] && { echo "ERROR: both yarn.lock and package-lock.json present; aborting" >&2; exit 11; }
+# choose package manager
+if [ -f yarn.lock ]; then PKG_MANAGER="yarn"; elif [ -f package-lock.json ]; then PKG_MANAGER="npm"; else PKG_MANAGER="npm"; fi
+# determine lockfile to checksum
+LOCKFILE=""
+if [ -f package-lock.json ]; then LOCKFILE="package-lock.json"; elif [ -f yarn.lock ]; then LOCKFILE="yarn.lock"; fi
+# decide if reinstall required
+REINSTALL=0
+[ ! -d node_modules ] && REINSTALL=1
+if [ -n "$LOCKFILE" ] && [ -f "$LOCKFILE" ]; then
+  sha_file=".install.lockfile.sha"
+  newsha=$(sha256sum "$LOCKFILE" | awk '{print $1}')
+  if [ ! -f "$sha_file" ] || [ "$(cat "$sha_file")" != "$newsha" ]; then REINSTALL=1; fi
+fi
+[ "$REINSTALL" -eq 0 ] && exit 0
+# run install with one retry
+attempts=0
+rc=1
+until [ $attempts -ge 2 ]; do
+  attempts=$((attempts+1))
+  if [ "$PKG_MANAGER" = "yarn" ]; then
+    yarn --frozen-lockfile --prefer-offline --silent || rc=$?
+    rc=${rc:-0}
   else
-    npm install --no-audit --progress=false --no-fund --silent || { echo 'npm install failed' >&2; exit 7; }
+    if [ -f package-lock.json ]; then
+      npm ci --prefer-offline --no-audit --no-fund --loglevel=error || rc=$?
+      rc=${rc:-0}
+    else
+      npm i --prefer-offline --no-audit --no-fund --silent || rc=$?
+      rc=${rc:-0}
+    fi
+  fi
+  [ ${rc:-0} -eq 0 ] && break || sleep 2
+done
+if [ ${rc:-0} -ne 0 ]; then echo "ERROR: dependency install failed (rc=${rc:-1})" >&2; exit 12; fi
+# update checksum file
+if [ -n "$LOCKFILE" ] && [ -f "$LOCKFILE" ]; then sha256sum "$LOCKFILE" | awk '{print $1}' > .install.lockfile.sha; fi
+# ensure jest-environment-jsdom present
+if ! node -e "try{require('jest-environment-jsdom');process.exit(0);}catch(e){process.exit(2)}" >/dev/null 2>&1; then
+  if [ "$PKG_MANAGER" = "yarn" ]; then yarn add -D jest-environment-jsdom --silent; else npm i -D jest-environment-jsdom --silent; fi
+fi
+# If TypeScript sources detected but typescript devDep missing, add and verify
+if ls src/*.ts src/*.tsx >/dev/null 2>&1; then
+  if ! node -e "try{require('typescript');process.exit(0);}catch(e){process.exit(2)}" >/dev/null 2>&1; then
+    if [ "$PKG_MANAGER" = "yarn" ]; then yarn add -D typescript @types/react @types/react-dom --silent; else npm i -D typescript @types/react @types/react-dom --silent; fi
   fi
 fi
-# Ensure jq exists for JSON checks; jq is typically present in image, but verify
-if ! command -v jq >/dev/null 2>&1; then
-  sudo apt-get update -qq && sudo apt-get install -y -qq jq || true
-fi
-has_pkg_dep(){ jq -e ".dependencies[\"$1\"]? // .devDependencies[\"$1\"]?" package.json >/dev/null 2>&1; }
-# Ensure react-scripts present locally as devDependency
-if ! has_pkg_dep react-scripts; then
-  npm i --no-audit --no-fund --save-dev react-scripts --silent || { echo 'failed to install react-scripts' >&2; exit 8; }
-fi
-# Ensure testing libs
-if ! has_pkg_dep "@testing-library/react"; then
-  npm i --no-audit --no-fund --save-dev @testing-library/react @testing-library/jest-dom --silent || { echo 'failed to install testing libs' >&2; exit 9; }
-fi
-# Ensure serve for validation
-if ! has_pkg_dep serve; then
-  npm i --no-audit --no-fund --save-dev serve --silent || true
-fi
-# Verify react-scripts binary presence
-if [ ! -x ./node_modules/.bin/react-scripts ]; then
-  echo 'react-scripts binary missing after install' >&2; exit 10
-fi
-# Record versions for debugging
-node --version || true
-npm --version || true
-command -v yarn >/dev/null 2>&1 && yarn --version || true
-( [ -f node_modules/.bin/create-react-app ] && node_modules/.bin/create-react-app --version ) || true
-# Ensure workspace owned by non-root user (idempotent)
-RUN_USER=$(awk -F: '($3>=1000)&&($1!="nobody"){print $1; exit}' /etc/passwd || echo devuser)
-echo "RUN_USER=$RUN_USER"
-sudo chown -R "$RUN_USER":"$RUN_USER" "$WORKSPACE" || true
